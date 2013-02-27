@@ -10,8 +10,8 @@
  *  This script is designed to back files and directories up to an 
  *  Amazon S3 bucket.
  *
- *  Written by Chris McDermott, AppliedTrust, chris@appliedtrust.com
- *    v0.1 10/16/2012
+ *  Written by Chris McDermott, chris@mcvine.net
+ *    v0.1 02/15/2013
  *
  *  @param config (-f)
  *    Specify the software platform to check. Acceptable values are
@@ -22,6 +22,7 @@
  *  @return
  *    Returns true if no errors were encountered, false otherwise.
  */
+
 putenv('TZ=America/Denver');
 $debug = 0;
 $logfile = './log';
@@ -41,6 +42,9 @@ foreach($sources as $source) {
   process_source($source);
 }
 
+
+
+
 /**
  *  Processes a source.
  */
@@ -49,21 +53,79 @@ function process_source ($source) {
     'key' => $source['AccessKey'],
     'secret' => $source['SecretAccessKey'],
   );
+  $bucketlist = get_bucket_contents($source['Bucket'], $source['Path'], $s3options);
   $s3 = new AmazonS3($s3options);
   foreach ($source['Files'] as $file) {
+    $name = strip_path($file);
     if (is_file($file)) {
-      upload_file($s3, $source['Bucket'], $source['Path'], $file);
+      $search_result = array_search($source['Path'] . "/" . $name, $bucketlist);
+      if ($search_result === false) {
+        upload_file($s3, $source['Bucket'], $source['Path'], $file);
+      } else {
+        unset($bucketlist[$search_result]);
+      }
     } else if (is_dir($file)) {
       $dh = opendir($file);
       while (false !== ($entry = readdir($dh))) {
         if ($entry != "." && $entry != "..") {
-            $fullfile = $file . '/' . $entry;
+          $fullfile = $file . '/' . $entry;
+          $name = strip_path($file);
+          $search_result = array_search($source['Path'] . "/" . $entry, $bucketlist);
+          if ($search_result === false) {
+            print "Uploading $fullfile\n";
             upload_file($s3, $source['Bucket'], $source['Path'], $fullfile);
+          } else {
+            unset($bucketlist[$search_result]);
+          }
         }
       }
-      closedir($handle);
+      closedir($dh);
+    }
+    
+    # sometimes an empty element gets in there, so remove it
+    if ($bucketlist[0] === "") {
+      unset($bucketlist[0]);
+    }
+    
+    $delete_options = array();
+    $delete_options['objects'] = array();
+    foreach ($bucketlist as $filename) {
+      array_push($delete_options['objects'], array(
+        'key' => $filename,
+      ));
+    }
+    $delete_response = $s3->delete_objects($source['Bucket'], $delete_options);
+  }
+}
+
+/**
+  *
+  */
+function get_bucket_contents ($bucket, $path, $s3options) {
+  $s3 = new AmazonS3($s3options);
+  $complete = false;
+  $objects = array();
+  $list_options = array(
+    'prefix' => $path,
+  );
+  while (!$complete) {
+    $response = $s3->list_objects($bucket, $list_options);
+    #print_r($response);
+    foreach ($response->body->Contents as $object) {
+      $fullname = "$object->Key";
+      #$name = strip_path("$fullname");
+      #array_push($objects, $name);
+      if ($fullname === $path . "/") {
+        continue;
+      } else {
+        array_push($objects, $fullname);
+      }
+    }
+    if ($response->body->IsTruncated !== 'false') {
+      $complete = true;
     }
   }
+  return $objects;
 }
 
 /**
@@ -75,11 +137,15 @@ function upload_file ($s3, $bucket, $path, $file) {
     'acl' => AmazonS3::ACL_PRIVATE,
   );
   $name = strip_path($file);
-  $upload_response = $s3->create_object($bucket, $path.'/'.$name, $upload_options);
+  $upload_response = $s3->create_mpu_object($bucket, $path.'/'.$name, $upload_options);
+  print "upload response:\n";
+  print_r($upload_response);
+  print "\n";
   if($upload_response->isOK()) {
     log_this('DEBUG', "Successfully uploaded $file.");
   } else {
-    log_this('ERROR', "Failed to upload $file:\n\t$upload_response->body->Message");
+    print_r($upload_response->body);
+    log_this('ERROR', "Failed to upload $file:\n\t" . $upload_response->body->Message);
   }
 }
 
@@ -88,7 +154,7 @@ function upload_file ($s3, $bucket, $path, $file) {
  */
 function strip_path ($file) {
   if (preg_match('/\/([^\/]*)$/', $file, $matches)) {
-    log_this('DEBUG', "Stripping $file down to just $matches[1].");
+    #log_this('DEBUG', "Stripping $file down to just $matches[1].");
     return $matches[1];
   } else {
     return $file;
@@ -117,9 +183,9 @@ function read_config ($file) {
   if ($fh) {
     while (($buffer = fgets($fh)) !== false) {
       if (preg_match('/^Access Key/', $buffer)) {
-        next;
+        continue;
       } else if (preg_match('/^---------------------/', $buffer)) {
-        next;
+        continue;
       } else if (preg_match('/(.*)::(.*)::(.*)::(.*)::(.*)/', $buffer, $matches)) {
         $source = array();
         $source = array(
